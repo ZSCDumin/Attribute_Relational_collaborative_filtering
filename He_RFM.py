@@ -30,7 +30,7 @@ def parse_args():
                         help='Batch size.')
     parser.add_argument('--hidden_factor', type=int, default=64,
                         help='Number of hidden factors.')
-    parser.add_argument('--out_hidden_factor', type=int, default=32,
+    parser.add_argument('--out_hidden_factor', type=int, default=5,
                         help='Number of output hidden factors of relational networks.')
     parser.add_argument('--lamda', type=float, default=1e-2,
                         help='Regularizer for bilinear part.')
@@ -362,7 +362,7 @@ if __name__ == '__main__':
     args = parse_args()
     data = DATA.LoadData(args.path, args.dataset, args.loss_type, args.batch_size)
     if args.verbose > 0:
-        print("FM: dataset=%s, factors=%d, loss_type=%s, #epoch=%d, batch=%d, lr=%.4f, lambda=%.1e, keep=%.2f, optimizer=%s, batch_norm=%d"
+        print("ARFM: dataset=%s, factors=%d, loss_type=%s, #epoch=%d, batch=%d, lr=%.4f, lambda=%.1e, keep=%.2f, optimizer=%s, batch_norm=%d"
               %(args.dataset, args.hidden_factor, args.loss_type, args.epoch, args.batch_size, args.lr, args.lamda, args.keep_prob, args.optimizer, args.batch_norm))
 
     save_file = '../pretrain/%s_%d/%s_%d' %(args.dataset, args.hidden_factor, args.dataset, args.hidden_factor)
