@@ -1,15 +1,3 @@
-'''
-Tensorflow implementation of Factorization Machines (FM) as described in:
-Xiangnan He, Tat-Seng Chua. Neural Factorization Machines for Sparse Predictive Analytics. In Proc. of SIGIR 2017.
-
-Note that the original paper of FM is: Steffen Rendle. Factorization Machines. In Proc. of ICDM 2010.
-
-@author: 
-Xiangnan He (xiangnanhe@gmail.com)
-Lizi Liao (liaolizi.llz@gmail.com)
-
-@references:
-'''
 import math
 import os
 import numpy as np
@@ -23,9 +11,13 @@ import argparse
 import LoadData as DATA
 from tensorflow.contrib.layers.python.layers import batch_norm as batch_norm
 
+os.environ["CUDA_VISIBLE_DEVICES"]="0"
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
+#
+
 #################### Arguments ####################
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run FM.")
+    parser = argparse.ArgumentParser(description="Run ARCF.")
     parser.add_argument('--path', nargs='?', default='data/',
                         help='Input data path.')
     parser.add_argument('--dataset', nargs='?', default='frappe',
@@ -197,7 +189,7 @@ class FM(BaseEstimator, TransformerMixin):
 
     def relation_network(self, xinput, reg, reuse=tf.AUTO_REUSE):
         with tf.variable_scope('relation_net', reuse=reuse) as scope:
-            layers = tf.layers.dense(xinput, 128, activation=tf.nn.relu, kernel_regularizer=reg)
+            layers = tf.layers.dense(xinput, 64, activation=tf.nn.relu, kernel_regularizer=reg)
             #layers = tf.layers.dense(layers, 32, activation=tf.nn.relu, kernel_regularizer=reg)
             output = tf.layers.dense(layers, self.out_hidden_factor, activation=None, kernel_regularizer=reg)
 
