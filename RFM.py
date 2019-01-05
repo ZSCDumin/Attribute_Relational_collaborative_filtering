@@ -300,7 +300,9 @@ class FM(BaseEstimator, TransformerMixin):
             all_weights['feature_relation_bias_1'] = tf.Variable(np.random.normal(loc=0, scale=glorot, size=(1, self.relation_layers[1])), dtype=np.float32)  # 1 * layers[0]
 
             glorot = np.sqrt(2.0 / (self.hidden_factor + self.relation_layers[-1]))
-            all_weights['user_relation_layer_0'] = tf.Variable(np.random.normal(loc=0, scale=glorot, size=(self.relation_layers[-1] + self.hidden_factor, self.relation_layers[1])), dtype=np.float32)
+            #all_weights['user_relation_layer_0'] = tf.Variable(np.random.normal(loc=0, scale=glorot, size=(self.relation_layers[-1] + self.hidden_factor, self.relation_layers[1])), dtype=np.float32)
+            all_weights['user_relation_layer_0'] = tf.Variable(np.random.normal(loc=0, scale=glorot, size=(self.hidden_factor + self.hidden_factor, self.relation_layers[1])), dtype=np.float32)
+
             all_weights['user_relation_bias_0'] = tf.Variable(np.random.normal(loc=0, scale=glorot, size=(1, self.relation_layers[1])), dtype=np.float32)  # 1 * layers[0]
 
             glorot = np.sqrt(2.0 / (self.relation_layers[-1] + self.deep_layers[0]))
