@@ -229,12 +229,12 @@ class FM(BaseEstimator, TransformerMixin):
     
     def relation_network(self, v1, v2, user_emb, reg, reuse=tf.AUTO_REUSE):
         #handle with two feature embeddings
-        xinput = tf.multiply(v1, v2)
-        layers = tf.add(tf.matmul(xinput, self.weights['feature_relation_layer_0']), self.weights['feature_relation_bias_0']) # None * layer[i] * 1
-        layers = tf.nn.relu(layers)
-        layers = tf.add(tf.matmul(layers, self.weights['feature_relation_layer_1']), self.weights['feature_relation_bias_1']) # None * layer[i] * 1
-        layers = tf.nn.relu(layers)
-        layers = tf.layers.dropout(layers, rate=self.dropout_keep[0])
+        layers = tf.multiply(v1, v2)
+        #layers = tf.add(tf.matmul(xinput, self.weights['feature_relation_layer_0']), self.weights['feature_relation_bias_0']) # None * layer[i] * 1
+        #layers = tf.nn.relu(layers)
+        #layers = tf.add(tf.matmul(layers, self.weights['feature_relation_layer_1']), self.weights['feature_relation_bias_1']) # None * layer[i] * 1
+        #layers = tf.nn.relu(layers)
+        #layers = tf.layers.dropout(layers, rate=self.dropout_keep[0])
 
         # combines with user embedding
         layers = tf.concat([layers, user_emb], 1)
