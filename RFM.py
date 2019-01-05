@@ -11,30 +11,33 @@ import argparse
 import LoadData as DATA
 from tensorflow.contrib.layers.python.layers import batch_norm as batch_norm
 
-#os.environ["CUDA_VISIBLE_DEVICES"]="0"
-#os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
-#
 
+os.environ["CUDA_VISIBLE_DEVICES"]="0"
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
 #################### Arguments ####################
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run ARCF.")
+    parser = argparse.ArgumentParser(description="Run FM.")
     parser.add_argument('--path', nargs='?', default='data/',
                         help='Input data path.')
     parser.add_argument('--dataset', nargs='?', default='frappe',
                         help='Choose a dataset.')
-    parser.add_argument('--epoch', type=int, default=100,
+    parser.add_argument('--epoch', type=int, default=1000,
                         help='Number of epochs.')
     parser.add_argument('--pretrain', type=int, default=-1,
                         help='flag for pretrain. 1: initialize from pretrain; 0: randomly initialize; -1: save the model to pretrain file')
-    parser.add_argument('--batch_size', type=int, default=128,
+    parser.add_argument('--batch_size', type=int, default=2048,
                         help='Batch size.')
-    parser.add_argument('--hidden_factor', type=int, default=64,
+    parser.add_argument('--hidden_factor', type=int, default=32,
                         help='Number of hidden factors.')
-    parser.add_argument('--out_hidden_factor', type=int, default=5,
-                        help='Number of output hidden factors of relational networks.')
-    parser.add_argument('--lamda', type=float, default=1e-2,
+    parser.add_argument('--relation_layers', nargs='?', default='[16, 4]',
+                        help="Size of each relation layer.")
+    parser.add_argument('--deep_layers', nargs='?', default='[64]',
+                        help="Size of each relation layer.")
+    parser.add_argument('--lamda', type=float, default=0,
                         help='Regularizer for bilinear part.')
-    parser.add_argument('--keep_prob', type=float, default=0.5, 
+    parser.add_argument('--reg_scale', type=float, default=0.01,
+                        help='Regularizer for bilinear part.')
+    parser.add_argument('--keep_prob', nargs='?', default='[0.5, 0.8, 0.8]', 
                     help='Keep probility (1-dropout_ratio) for the Bi-Interaction layer. 1: no dropout')
     parser.add_argument('--lr', type=float, default=0.05,
                         help='Learning rate.')
@@ -46,27 +49,34 @@ def parse_args():
                         help='Show the results per X epochs (0, 1 ... any positive integer)')
     parser.add_argument('--batch_norm', type=int, default=0,
                     help='Whether to perform batch normaization (0 or 1)')
-    parser.add_argument('--attention', type=bool, default=False,
-                    help='whether to perform attention (True or False)')
+    parser.add_argument('--RFM', type=int, default=1,
+                    help='Whether to perform Relational network(0 or 1)')
+    parser.add_argument('--DEEP_FM', type=int, default=0,
+                    help='Whether to perform deep neural FM (0 or 1)')
+
 
     return parser.parse_args()
 
 class FM(BaseEstimator, TransformerMixin):
-    def __init__(self, features_M, users_M, features_dim, pretrain_flag, save_file, attention, hidden_factor, out_hidden_factor, loss_type, epoch, batch_size, learning_rate, lamda_bilinear, keep,
+    def __init__(self, RFM, DEEP_FM, features_M, users_M, features_dim, pretrain_flag, save_file, hidden_factor, 
+                 relation_layers, deep_layers, loss_type, epoch, batch_size, learning_rate, lamda_bilinear, reg_scale, keep,
                  optimizer_type, batch_norm, verbose, random_seed=2016):
         # bind params to class
+        self.RFM = RFM
+        self.DEEP_FM = DEEP_FM
         self.batch_size = batch_size
         self.learning_rate = learning_rate
         self.hidden_factor = hidden_factor
-        self.out_hidden_factor = out_hidden_factor
+        self.relation_layers = relation_layers
+        self.deep_layers = deep_layers
         self.save_file = save_file
-        self.attention = attention
         self.pretrain_flag = pretrain_flag
         self.loss_type = loss_type
         self.features_M = features_M
         self.users_M = users_M
         self.features_dim = features_dim
         self.lamda_bilinear = lamda_bilinear
+        self.reg_scale = reg_scale
         self.keep = keep
         self.epoch = epoch
         self.random_seed = random_seed
@@ -75,7 +85,8 @@ class FM(BaseEstimator, TransformerMixin):
         self.verbose = verbose
         # performance of each epoch
         self.train_rmse, self.valid_rmse, self.test_rmse = [], [], []
-
+        self.num_interations = 90 
+ 
         # init all variables in a tensorflow graph
         self._init_graph()
 
@@ -89,57 +100,93 @@ class FM(BaseEstimator, TransformerMixin):
             tf.set_random_seed(self.random_seed)
             # Input data.
             self.train_features = tf.placeholder(tf.int32, shape=[None, None])  # None * features_M
-            self.train_users = tf.placeholder(tf.int32, shape=[None, 1])  # None * 1  
+            self.train_users = tf.placeholder(tf.int32, shape=[None])  # None   
             self.train_labels = tf.placeholder(tf.float32, shape=[None, 1])  # None * 1
-            self.dropout_keep = tf.placeholder(tf.float32)
+            self.dropout_keep = tf.placeholder(tf.float32, shape=[len(self.keep)])
             self.train_phase = tf.placeholder(tf.bool)
 
             # Variables.
             self.weights = self._initialize_weights()
-
-            # Model.
-            
             nonzero_embeddings = tf.nn.embedding_lookup(self.weights['feature_embeddings'], self.train_features)
             user_embeddings = tf.nn.embedding_lookup(self.weights['user_embeddings'], self.train_users)
-            bi = self.permutate(nonzero_embeddings, tf.reshape(user_embeddings, [-1, self.hidden_factor]))
+            regularizer = tf.contrib.layers.l2_regularizer(scale=self.reg_scale)
+            # Model.
+
+            self.FM = self.permutate(nonzero_embeddings, user_embeddings, regularizer)
+            self.FM = tf.nn.dropout(self.FM, self.dropout_keep[1]) # dropout at the FM layer
+            if not self.DEEP_FM:
+                self.FM = tf.reduce_sum(self.FM, 1, keepdims=True)  # None * 1
+            #self.perm_result = self.FM 
+            """ 
+            # _________ sum_square part _____________
+            # get the summed up embeddings of features.
+            self.summed_features_emb = tf.reduce_sum(nonzero_embeddings, 1) # None * K
+            # get the element-multiplication
+            self.summed_features_emb_square = tf.square(self.summed_features_emb)  # None * K
+
+            # _________ square_sum part _____________
+            self.squared_features_emb = tf.square(nonzero_embeddings)
+            self.squared_sum_features_emb = tf.reduce_sum(self.squared_features_emb, 1)  # None * K
+
+            # ________ FM __________
+            self.FM = 0.5 * tf.subtract(self.summed_features_emb_square, self.squared_sum_features_emb)  # None * K
+            if self.batch_norm:
+                self.FM = self.batch_norm_layer(self.FM, train_phase=self.train_phase, scope_bn='bn_fm')
+            self.FM = tf.nn.dropout(self.FM, self.dropout_keep) # dropout at the FM layer
+            self.FM = tf.reduce_sum(self.FM, 1, keepdims=True)  # None * 1
             
+            self.sqr_result = self.FM
+            """
 
+            if self.DEEP_FM:
+                self.FM = self.deep_FM(self.FM, regularizer)
             # _________out _________
-            #Bilinear = tf.reduce_sum(self.FM, 1, keep_dims=True)  # None * 1
+            #self.Bilinear = tf.reduce_sum(self.FM, 1, keepdims=True)  # None * 1
+            self.Bilinear = self.FM
             self.Feature_bias = tf.reduce_sum(tf.nn.embedding_lookup(self.weights['feature_bias'], self.train_features) , 1)  # None * 1
-            self.User_bias = tf.reduce_sum(tf.nn.embedding_lookup(self.weights['user_bias'], self.train_users) , 1)  # None * 1
             Bias = self.weights['bias'] * tf.ones_like(self.train_labels)  # None * 1
-            self.out = tf.add_n([bi, self.Feature_bias, self.User_bias, Bias])  # None * 1
+            self.out = tf.add_n([self.Bilinear, self.Feature_bias, Bias])  # None * 1
 
-            #variables_names = [v.name for v in tf.trainable_variables()]
+
 
             # Compute the loss.
+            try:
+                self.reg_losses = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+                self.reg_losses = tf.add_n(self.reg_losses)
+            except:
+                self.reg_losses = 0
             if self.loss_type == 'square_loss':
                 if self.lamda_bilinear > 0:
-                    print('aaaaaaaaaaaaaaaaaaaa')
-                    self.reg_losses = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
-                    print(self.reg_losses)
-                    exit()
-                    self.reg_losses = tf.add_n(self.reg_losses)
-                    self.loss = tf.nn.l2_loss(tf.subtract(self.train_labels, self.out)) + self.reg_losses  # regulizer
+                    self.loss = tf.nn.l2_loss(
+                        tf.subtract(self.train_labels, self.out)) + \
+                        tf.contrib.layers.l2_regularizer(self.lamda_bilinear)(
+                            self.weights['feature_embeddings']) + self.reg_losses  # regulizer
                 else:
-                    self.loss = tf.nn.l2_loss(tf.subtract(self.train_labels, self.out))
+                    self.loss = tf.nn.l2_loss(tf.subtract(self.train_labels, self.out)) 
+            """
             elif self.loss_type == 'log_loss':
                 self.out = tf.sigmoid(self.out)
                 if self.lamda_bilinear > 0:
-                    self.loss = tf.contrib.losses.log_loss(self.out, self.train_labels, weight=1.0, epsilon=1e-07, scope=None) + tf.contrib.layers.l2_regularizer(self.lamda_bilinear)(self.weights['feature_embeddings'])  # regulizer
+                    self.loss = tf.contrib.losses.log_loss(
+                        self.out, self.train_labels, weight=1.0, epsilon=1e-07, scope=None) + \
+                        tf.contrib.layers.l2_regularizer(self.lamda_bilinear)(
+                            self.weights['feature_embeddings'])  # regulizer
                 else:
                     self.loss = tf.contrib.losses.log_loss(self.out, self.train_labels, weight=1.0, epsilon=1e-07, scope=None)
-
+            """
             # Optimizer.
             if self.optimizer_type == 'AdamOptimizer':
-                self.optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate, beta1=0.9, beta2=0.999, epsilon=1e-8).minimize(self.loss)
+                self.optimizer = tf.train.AdamOptimizer(
+                    learning_rate=self.learning_rate, beta1=0.9, beta2=0.999, epsilon=1e-8).minimize(self.loss)
             elif self.optimizer_type == 'AdagradOptimizer':
-                self.optimizer = tf.train.AdagradOptimizer(learning_rate=self.learning_rate, initial_accumulator_value=1e-8).minimize(self.loss)
+                self.optimizer = tf.train.AdagradOptimizer(
+                    learning_rate=self.learning_rate, initial_accumulator_value=1e-8).minimize(self.loss)
             elif self.optimizer_type == 'GradientDescentOptimizer':
-                self.optimizer = tf.train.GradientDescentOptimizer(learning_rate=self.learning_rate).minimize(self.loss)
+                self.optimizer = tf.train.GradientDescentOptimizer(
+                    learning_rate=self.learning_rate).minimize(self.loss)
             elif self.optimizer_type == 'MomentumOptimizer':
-                self.optimizer = tf.train.MomentumOptimizer(learning_rate=self.learning_rate, momentum=0.95).minimize(self.loss)
+                self.optimizer = tf.train.MomentumOptimizer(
+                    learning_rate=self.learning_rate, momentum=0.95).minimize(self.loss)
 
             # init
             self.saver = tf.train.Saver()
@@ -159,71 +206,79 @@ class FM(BaseEstimator, TransformerMixin):
                 print("#params: %d" %total_parameters) 
 
 
-    def permutate(self, attr_embeddings, user_embeddings):
-        v_perm = []
-        a_perm = []
-        regularizer = tf.contrib.layers.l2_regularizer(scale=self.lamda_bilinear)
+    def permutate(self, embeddings, user_embeddings, regularizer):
+        v_perm_list = []
+
         for i in range(self.features_dim):
-            for j in range(self.features_dim):
-                if i != j:
-                    v_i = attr_embeddings[:,i,:]
-                    v_j = attr_embeddings[:,j,:]
-                    v_input = tf.concat([v_i, v_j, user_embeddings], axis=1)
-                    v_output = self.relation_network(v_input, regularizer) 
-                    #v_dotpro = tf.reduce_sum(tf.multiply(v_i, v_j), axis=1, keepdims=True)
-                    v_perm.append(tf.expand_dims(v_output, 1))
-                    if self.attention:
-                        a_input = tf.concat([v_i, v_j], axis=1)
-                        a_output = self.attention_network(a_input, regularizer)
-                        a_perm.append(a_output) 
-            
-        v_concat = tf.concat(v_perm, axis=1) 
-
-        if self.attention:
-            a_weight = tf.nn.softmax(tf.concat(a_perm, axis=1))
-            a_weight = tf.nn.dropout(a_weight, self.dropout_keep)
-            result = tf.multiply(v_concat, tf.expand_dims(a_weight, 2))
-        else:
-            result = v_concat 
+            starter = i+1 if self.RFM else i+1 
+            for j in range(starter, self.features_dim):
+                if i == j:
+                    continue
+                v_i = embeddings[:,i,:]
+                v_j = embeddings[:,j,:]
+                #dot product of two vectors
+                if self.RFM:
+                    v_output = self.relation_network(v_i, v_j, user_embeddings, regularizer) 
+                    #v_output = tf.add(v_i, v_j)
+                else:
+                    v_output = tf.multiply(v_i, v_j)
+                    #v_output = tf.add(v_i,v_j)
+                v_perm_list.append(tf.expand_dims(v_output, 1))
+        v_concat = tf.concat(v_perm_list, axis=1) 
+        return tf.reduce_sum(v_concat, 1)
     
-        result = tf.reduce_sum(result, axis=1)
-        self.prediction = tf.matmul(result, self.weights['prediction']) # None * 1
-        return self.prediction 
+    def relation_network(self, v1, v2, user_emb, reg, reuse=tf.AUTO_REUSE):
+        #handle with two feature embeddings
+        xinput = tf.multiply(v1, v2)
+        layers = tf.add(tf.matmul(xinput, self.weights['feature_relation_layer_0']), self.weights['feature_relation_bias_0']) # None * layer[i] * 1
+        layers = tf.nn.relu(layers)
+        layers = tf.add(tf.matmul(layers, self.weights['feature_relation_layer_1']), self.weights['feature_relation_bias_1']) # None * layer[i] * 1
+        layers = tf.nn.relu(layers)
+        layers = tf.layers.dropout(layers, rate=self.dropout_keep[0])
 
-    def relation_network(self, xinput, reg, reuse=tf.AUTO_REUSE):
-        with tf.variable_scope('relation_net', reuse=reuse) as scope:
-            layers = tf.layers.dense(xinput, 64, activation=tf.nn.relu, kernel_regularizer=reg)
-            #layers = tf.layers.dense(layers, 32, activation=tf.nn.relu, kernel_regularizer=reg)
-            #output = tf.layers.dense(layers, self.out_hidden_factor, activation=None, kernel_regularizer=reg)
-            output = tf.layers.dense(layers, 1, activation=None, kernel_regularizer=reg)
+        # combines with user embedding
+        layers = tf.concat([layers, user_emb], 1)
+        layers = tf.add(tf.matmul(layers, self.weights['user_relation_layer_0']), self.weights['user_relation_bias_0']) # None * layer[i] * 1
+        layers = tf.nn.relu(layers)
+        layers = tf.layers.dropout(layers, rate=self.dropout_keep[0])
 
-        return output
-    
-    def attention_network(self, xinput, reg, reuse=tf.AUTO_REUSE):
-        with tf.variable_scope('attention_net', reuse=reuse) as scope:
-            layers = tf.layers.dense(xinput, 16, activation=tf.nn.relu, kernel_regularizer=reg)
-            output = tf.layers.dense(layers, 1, activation=None, kernel_regularizer=reg)
-
-        return output
-
+        return layers 
         
+    def deep_FM(self, xinput, reg):
+        layers = xinput
+        # ________ Deep Layers __________
+        layers = tf.add(tf.matmul(layers, self.weights['deeplayer_0']), self.weights['deepbias_0']) # None * layer[i] * 1
+        if self.batch_norm:
+            layers = self.batch_norm_layer(layers, train_phase=self.train_phase, scope_bn='bn_0') # None * layer[i] * 1
+        layers = tf.nn.relu(layers)
+        layers = tf.nn.dropout(layers, self.dropout_keep[2]) # dropout at each Deep layer
+        layers = tf.matmul(layers, self.weights['prediction'])     # None * 1
+
+
+        """
+        with tf.variable_scope('deep_FM', reuse=tf.AUTO_REUSE) as scope:
+            layers = tf.layers.dense(xinput, 64, activation=tf.nn.relu, kernel_regularizer=reg)
+            if self.batch_norm:
+                layers = self.batch_norm_layer(layers, train_phase=self.train_phase, scope_bn='bn_1') # None * layer[i] * 1
+            layers = tf.layers.dropout(layers, rate=0.5)
+ 
+            layers = tf.layers.dense(layers, 1, activation=None, kernel_regularizer=reg)
+        """
+        return layers
+            
     def _initialize_weights(self):
         all_weights = dict()
         if self.pretrain_flag > 0:
             weight_saver = tf.train.import_meta_graph(self.save_file + '.meta')
             pretrain_graph = tf.get_default_graph()
             feature_embeddings = pretrain_graph.get_tensor_by_name('feature_embeddings:0')
-            user_embeddings = pretrain_graph.get_tensor_by_name('user_embeddings:0')
             feature_bias = pretrain_graph.get_tensor_by_name('feature_bias:0')
-            user_bias = pretrain_graph.get_tensor_by_name('user_bias:0')
             bias = pretrain_graph.get_tensor_by_name('bias:0')
             with tf.Session() as sess:
                 weight_saver.restore(sess, self.save_file)
-                fe, ue, fb, ub, b = sess.run([feature_embeddings, user_embeddings, feature_bias, user_bias, bias])
+                fe, fb, b = sess.run([feature_embeddings, feature_bias, bias])
             all_weights['feature_embeddings'] = tf.Variable(fe, dtype=tf.float32)
-            all_weights['user_embeddings'] = tf.Variable(ue, dtype=tf.float32)
             all_weights['feature_bias'] = tf.Variable(fb, dtype=tf.float32)
-            all_weights['user_bias'] = tf.Variable(ub, dtype=tf.float32)
             all_weights['bias'] = tf.Variable(b, dtype=tf.float32)
         else:
             all_weights['feature_embeddings'] = tf.Variable(
@@ -234,12 +289,29 @@ class FM(BaseEstimator, TransformerMixin):
                 name='user_embeddings')  # features_M * K
             all_weights['feature_bias'] = tf.Variable(
                 tf.random_uniform([self.features_M, 1], 0.0, 0.0), name='feature_bias')  # features_M * 1
-            all_weights['user_bias'] = tf.Variable(
-                tf.random_uniform([self.users_M, 1], 0.0, 0.0), name='user_bias')  # users_M * 1
             all_weights['bias'] = tf.Variable(tf.constant(0.0), name='bias')  # 1 * 1
-        
-        all_weights['prediction'] = tf.Variable(np.ones((self.out_hidden_factor, 1), dtype=np.float32))  # hidden_factor * 1
-        #all_weights['prediction'] = tf.Constant(np.ones((self.out_hidden_factor, 1), dtype=np.float32))  # hidden_factor * 1
+            # relation layers
+            glorot = np.sqrt(2.0 / (self.hidden_factor + self.relation_layers[0]))
+            all_weights['feature_relation_layer_0'] = tf.Variable(np.random.normal(loc=0, scale=glorot, size=(self.hidden_factor, self.relation_layers[0])), dtype=np.float32)
+            all_weights['feature_relation_bias_0'] = tf.Variable(np.random.normal(loc=0, scale=glorot, size=(1, self.relation_layers[0])), dtype=np.float32)  # 1 * layers[0]
+
+            glorot = np.sqrt(2.0 / (self.relation_layers[0] + self.relation_layers[1]))
+            all_weights['feature_relation_layer_1'] = tf.Variable(np.random.normal(loc=0, scale=glorot, size=(self.relation_layers[0], self.relation_layers[1])), dtype=np.float32)
+            all_weights['feature_relation_bias_1'] = tf.Variable(np.random.normal(loc=0, scale=glorot, size=(1, self.relation_layers[1])), dtype=np.float32)  # 1 * layers[0]
+
+            glorot = np.sqrt(2.0 / (self.hidden_factor + self.relation_layers[-1]))
+            all_weights['user_relation_layer_0'] = tf.Variable(np.random.normal(loc=0, scale=glorot, size=(self.relation_layers[-1] + self.hidden_factor, self.relation_layers[1])), dtype=np.float32)
+            all_weights['user_relation_bias_0'] = tf.Variable(np.random.normal(loc=0, scale=glorot, size=(1, self.relation_layers[1])), dtype=np.float32)  # 1 * layers[0]
+
+            glorot = np.sqrt(2.0 / (self.relation_layers[-1] + self.deep_layers[0]))
+            if self.RFM:
+                all_weights['deeplayer_0'] = tf.Variable(np.random.normal(loc=0, scale=glorot, size=(self.relation_layers[-1], self.deep_layers[0])), dtype=np.float32)
+            else:
+                all_weights['deeplayer_0'] = tf.Variable(np.random.normal(loc=0, scale=glorot, size=(self.hidden_factor, self.deep_layers[0])), dtype=np.float32)
+            all_weights['deepbias_0'] = tf.Variable(np.random.normal(loc=0, scale=glorot, size=(1, self.deep_layers[0])), dtype=np.float32)  # 1 * layers[0]
+
+            all_weights['prediction'] = tf.Variable(np.ones((self.deep_layers[-1], 1), dtype=np.float32))  # hidden_factor * 1
+
         return all_weights
 
     def batch_norm_layer(self, x, train_phase, scope_bn):
@@ -252,8 +324,10 @@ class FM(BaseEstimator, TransformerMixin):
         return z
 
     def partial_fit(self, data):  # fit a batch
-        feed_dict = {self.train_features: data['X'], self.train_users:data['U'], self.train_labels: data['Y'], self.dropout_keep: self.keep, self.train_phase: True}
+        feed_dict = {self.train_features: data['X'], self.train_users: data['U'], self.train_labels: data['Y'], self.dropout_keep: self.keep, self.train_phase: True}
         loss, opt = self.sess.run((self.loss, self.optimizer), feed_dict=feed_dict)
+        #p_fm, s_fm = self.sess.run((self.perm_result, self.sqr_result), feed_dict=feed_dict)
+        #print(p_fm[0], s_fm[0]) 
         return loss
 
     def get_random_block_from_data(self, data, batch_size):  # generate a random block of training data
@@ -281,7 +355,7 @@ class FM(BaseEstimator, TransformerMixin):
                 break
         return {'X': X, 'Y': Y, 'U': U}
 
-    def shuffle_in_unison_scary(self, a, b, c): # shuffle two lists simutaneously
+    def shuffle_in_unison_scary(self, a, b, c): # shuffle all lists simutaneously
         rng_state = np.random.get_state()
         np.random.shuffle(a)
         np.random.set_state(rng_state)
@@ -289,11 +363,13 @@ class FM(BaseEstimator, TransformerMixin):
         np.random.set_state(rng_state)
         np.random.shuffle(c)
 
+
     def train(self, Train_data, Validation_data, Test_data):  # fit a dataset
         # Check Init performance
         if self.verbose > 0:
             t2 = time()
             init_train = self.evaluate(Train_data)
+            #init_train = 0
             init_valid = self.evaluate(Validation_data)
             init_test = self.evaluate(Test_data)
             print("Init: \t train=%.4f, validation=%.4f, test=%.4f [%.1f s]" %(init_train, init_valid, init_test, time()-t2))
@@ -311,6 +387,7 @@ class FM(BaseEstimator, TransformerMixin):
 
             # output validation
             train_result = self.evaluate(Train_data)
+            #train_result = 0
             valid_result = self.evaluate(Validation_data)
             test_result = self.evaluate(Test_data)
 
@@ -320,8 +397,8 @@ class FM(BaseEstimator, TransformerMixin):
             if self.verbose > 0 and epoch%self.verbose == 0:
                 print("Epoch %d [%.1f s]\ttrain=%.4f, validation=%.4f, test=%.4f [%.1f s]"
                       %(epoch+1, t2-t1, train_result, valid_result, test_result, time()-t2))
-            if self.eva_termination(self.valid_rmse):
-                break
+            #if self.eva_termination(self.valid_rmse):
+            #    break
 
         #if self.pretrain_flag < 0:
         #    print("Save model to file as pretrain.")
@@ -340,7 +417,12 @@ class FM(BaseEstimator, TransformerMixin):
 
     def evaluate(self, data):  # evaluate the results for an input set
         num_example = len(data['Y'])
-        feed_dict = {self.train_features: data['X'], self.train_users: data['U'], self.train_labels: [[y] for y in data['Y']], self.dropout_keep: 1.0, self.train_phase: False}
+        feed_dict = {
+            self.train_features: data['X'], 
+            self.train_users: data['U'],
+            self.train_labels: [[y] for y in data['Y']], 
+            self.dropout_keep: [1.0 for i in range(len(self.keep))], 
+            self.train_phase: False}
         predictions = self.sess.run((self.out), feed_dict=feed_dict)
         y_pred = np.reshape(predictions, (num_example,))
         y_true = np.reshape(data['Y'], (num_example,))
@@ -367,13 +449,35 @@ if __name__ == '__main__':
     args = parse_args()
     data = DATA.LoadData(args.path, args.dataset, args.loss_type, args.batch_size)
     if args.verbose > 0:
-        print("ARFM: dataset=%s, factors=%d, loss_type=%s, #epoch=%d, batch=%d, lr=%.4f, lambda=%.1e, keep=%.2f, optimizer=%s, batch_norm=%d"
-              %(args.dataset, args.hidden_factor, args.loss_type, args.epoch, args.batch_size, args.lr, args.lamda, args.keep_prob, args.optimizer, args.batch_norm))
+        print("FM: dataset=%s, factors=%d, loss_type=%s, #epoch=%d, batch=%d, lr=%.4f, lambda=%.1e, relation_layers=%s, keep=%s, optimizer=%s, batch_norm=%d, RFM=%s, DEEP_FM=%s"
+              %(args.dataset, args.hidden_factor, args.loss_type, args.epoch, args.batch_size,
+               args.lr, args.lamda, args.relation_layers, args.keep_prob, args.optimizer, args.batch_norm, args.RFM, args.DEEP_FM))
 
     save_file = '../pretrain/%s_%d/%s_%d' %(args.dataset, args.hidden_factor, args.dataset, args.hidden_factor)
     # Training
     t1 = time()
-    model = FM(data.features_M, data.users_M, data.feature_dim, args.pretrain, save_file, args.attention, args.hidden_factor, args.out_hidden_factor, args.loss_type, args.epoch, args.batch_size, args.lr, args.lamda, args.keep_prob, args.optimizer, args.batch_norm, args.verbose)
+    model = FM(
+        args.RFM, 
+        args.DEEP_FM,
+        data.features_M, 
+        data.users_M,
+        data.feature_dim, 
+        args.pretrain, 
+        save_file, 
+        args.hidden_factor, 
+        eval(args.relation_layers),
+        eval(args.deep_layers),
+        args.loss_type, 
+        args.epoch, 
+        args.batch_size, 
+        args.lr, 
+        args.lamda, 
+        args.reg_scale, 
+        eval(args.keep_prob), 
+        args.optimizer, 
+        args.batch_norm, 
+        args.verbose)
+
     model.train(data.Train_data, data.Validation_data, data.Test_data)
     
     # Find the best validation result across iterations

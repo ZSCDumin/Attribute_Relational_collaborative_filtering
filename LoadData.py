@@ -135,7 +135,7 @@ class LoadData(object):
             Y_for_logloss.append( v )
 
             X_.append( [ self.features[item] for item in items[2:]] )
-            U_.append([self.users[items[1]]])
+            U_.append(self.users[items[1]])
 
             line = f.readline()
         f.close()
